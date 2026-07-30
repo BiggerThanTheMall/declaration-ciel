@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LTOA - Agent Déclaration CIEL
 // @namespace    https://ltoa-assurances.fr/
-// @version      1.0.16.1
+// @version      1.0.17
 // @description  Traite les contrats CIEL, contrôle chaque preuve de paiement dans toute la GED, puis génère une déclaration Excel financièrement sécurisée et un JSON auditable.
 // @author       LTOA Assurances
 // @match        https://courtage.modulr.fr/*
@@ -20,7 +20,7 @@
     'use strict';
 
     const APP_ID = 'ltoa-agent-declaration-ciel';
-    const CURRENT_VERSION = '1.0.16';
+    const CURRENT_VERSION = '1.0.17';
     const STORAGE_KEY = 'ltoa.agentDeclarationCiel.v0.1';
     const ACTIVE_MONTH_KEY = 'ltoa.agentDeclarationCiel.activeMonth.v1';
     const MONTH_STATE_PREFIX = 'ltoa.agentDeclarationCiel.month.v1.';
@@ -3406,9 +3406,67 @@
         };
     }
 
-    function extractCielContractFacts(result) {
+    function normalizeCielContractNumber(value) {
+        return clean(value, 80)
+            .replace(/^[\s:;#°º-]+|[\s,;:.]+$/g, '')
+            .replace(/\s+/g, '');
+    }
+
+    function isPlausibleCielContractNumber(value) {
+        const number = normalizeCielContractNumber(value);
+        if (number.length < 4 || number.length > 40) return false;
+        if (!/[0-9]/.test(number)) return false;
+        if (/^(?:19|20)\d{2}$/.test(number)) return false;
+        if (/^\d{1,2}[./-]\d{1,2}[./-](?:19|20)\d{2}$/.test(number)) return false;
+        return !/^(?:ciel|contrat|adhesion|renouvellement|nouveau|affaire)$/i.test(number);
+    }
+
+    function explicitCielContractNumbers(rawText) {
+        const text = String(rawText || '');
+        const matches = [];
+        const pattern = /(?:n(?:um[eé]ro)?|n[°º])\s*(?:(?:du|de|d['’])\s*)?(?:contrat|adh[eé]sion)\s*:?\s*([A-Z0-9][A-Z0-9._/-]{3,39})/gi;
+        let match;
+        while ((match = pattern.exec(text))) {
+            const value = normalizeCielContractNumber(match[1]);
+            if (!isPlausibleCielContractNumber(value)) continue;
+            const prefix = normalize(text.slice(Math.max(0, match.index - 55), match.index));
+            const previousContract = /renouvellement du contrat$/.test(prefix)
+                || /ancien contrat$/.test(prefix)
+                || /contrat precedent$/.test(prefix);
+            matches.push({ value, previousContract });
+        }
+        return matches;
+    }
+
+    function policyRowCielContractNumber(result, targetYear) {
+        const effectYear = Number(String(result.policy?.effectDate || '').match(/(20\d{2})/)?.[1] || 0);
+        if (targetYear && effectYear && effectYear !== targetYear) return null;
+
+        const explicitSources = [
+            { text: result.client?.policyRowText || '', source: 'Ligne contrat de la fiche client' },
+            { text: result.policy?.referenceAndBusinessType || '', source: 'Référence du contrat Modulr' },
+        ];
+        for (const candidate of explicitSources) {
+            const match = explicitCielContractNumbers(candidate.text).find(item => !item.previousContract);
+            if (match) return { value: match.value, source: candidate.source };
+        }
+
+        // La première cellule métier de la liste Modulr regroupe la référence
+        // du contrat et le type d'affaire. Sur le contrat sélectionné pour 2026,
+        // son premier jeton est donc une source fiable si c'est une référence.
+        const referenceText = clean(result.policy?.referenceAndBusinessType || '', 180);
+        const firstToken = normalizeCielContractNumber(referenceText.split(/\s+/)[0] || '');
+        if (isPlausibleCielContractNumber(firstToken)) {
+            return { value: firstToken, source: 'Référence du contrat Modulr' };
+        }
+        return null;
+    }
+
+    function extractCielContractFacts(result, targetYear) {
         const facts = {
             contractNumber: '',
+            contractNumberSource: '',
+            contractNumberCandidates: [],
             previousContractNumber: '',
             effectDate: result.policy?.effectDate || '',
             expiration: '',
@@ -3425,11 +3483,24 @@
             phone: '',
             sources: [],
         };
+        const policyNumber = policyRowCielContractNumber(result, targetYear);
+        if (policyNumber) {
+            facts.contractNumber = policyNumber.value;
+            facts.contractNumberSource = policyNumber.source;
+            facts.contractNumberCandidates.push(policyNumber);
+        }
         for (const documentInfo of contractDocumentsForResult(result)) {
             const raw = documentContent(documentInfo);
             if (!/\bciel\s+assurances\b/i.test(raw) && !/\bbulletin\s+de\s+souscription\b/i.test(raw)) continue;
-            const contractNumber = raw.match(/num[eé]ro\s+(?:du\s+)?contrat\s*:\s*(\d{6,})/i)?.[1] || '';
-            const previousContractNumber = raw.match(/renouvellement\s+du\s+contrat\s+num[eé]ro\s*:?\s*(\d{6,})/i)?.[1] || '';
+            const documentYears = Array.from(raw.matchAll(/\b(20\d{2})\b/g)).map(match => Number(match[1]));
+            const documentMatchesTargetYear = !targetYear
+                || documentYears.includes(targetYear)
+                || Number(String(result.policy?.effectDate || '').match(/(20\d{2})/)?.[1] || 0) === targetYear;
+            const numberMatches = explicitCielContractNumbers(raw);
+            const currentNumber = documentMatchesTargetYear
+                ? numberMatches.find(item => !item.previousContract)?.value || ''
+                : '';
+            const previousContractNumber = numberMatches.find(item => item.previousContract)?.value || '';
             const effectDate = raw.match(/date\s+d['’]effet\s+souhait[eé]e\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1] || '';
             const subscriberMatch = raw.match(/souscripteur\s*:\s*((?:m(?:me|lle)?|mr)\.?)\s+([^\n\r]{2,100})/i);
             const birthDate = raw.match(/naissance\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1] || '';
@@ -3449,7 +3520,18 @@
                     used = true;
                 }
             };
-            assign('contractNumber', contractNumber);
+            if (currentNumber) {
+                const candidate = {
+                    value: currentNumber,
+                    source: `Document : ${documentInfo.name || 'pièce contractuelle'}`,
+                };
+                facts.contractNumberCandidates.push(candidate);
+                if (!facts.contractNumber) {
+                    facts.contractNumber = currentNumber;
+                    facts.contractNumberSource = candidate.source;
+                    used = true;
+                }
+            }
             assign('previousContractNumber', previousContractNumber);
             assign('effectDate', effectDate);
             assign('birthDate', birthDate);
@@ -3475,6 +3557,9 @@
         facts.sources = facts.sources.filter((source, index, all) =>
             all.findIndex(candidate => candidate.documentId === source.documentId) === index
         );
+        facts.contractNumberCandidates = facts.contractNumberCandidates.filter((candidate, index, all) =>
+            all.findIndex(item => item.value === candidate.value && item.source === candidate.source) === index
+        );
         return facts;
     }
 
@@ -3483,7 +3568,9 @@
         const rowOverrides = review.overrides || {};
         const contractOverrides = review.contractOverrides || {};
         const models = (state.results || []).map((result, contractIndex) => {
-            const facts = extractCielContractFacts(result);
+            const targetYear = Number(String(state.month || '').slice(0, 4))
+                || Number(String(result.policy?.effectDate || '').match(/(20\d{2})/)?.[1] || 0);
+            const facts = extractCielContractFacts(result, targetYear);
             const policySubscriber = splitPolicyIdentity(result.policy?.identity || '');
             const documentSubscriber = splitCielSubscriber(facts.subscriberName);
             const policyId = result.policy?.policyId || String(contractIndex + 1);
@@ -3506,7 +3593,13 @@
                 rowId,
                 policyId,
                 contractNumber: contractIndex + 1,
-                cieContractNumber: facts.contractNumber,
+                cieContractNumber: normalizeCielContractNumber(
+                    contractOverride.cieContractNumber !== undefined
+                        ? contractOverride.cieContractNumber
+                        : facts.contractNumber
+                ),
+                cieContractNumberSource: facts.contractNumberSource,
+                contractYear: targetYear,
                 previousContractNumber: facts.previousContractNumber,
                 role: 'Souscripteur',
                 adhesionType: canonicalCielAdhesionType(contractOverride.adhesionType || facts.type),
@@ -3545,6 +3638,11 @@
             if (!model.civility) model.issues.push('Civilité introuvable');
             if (!model.country) model.issues.push('Pays de rapatriement introuvable');
             if (!model.adhesionType) model.issues.push('Type de contrat Individuel / Famille introuvable');
+            if (!model.cieContractNumber) {
+                model.issues.push(
+                    `Numéro de contrat ${targetYear || ''} introuvable : créez-le puis renseignez-le dans le champ « N° de contrat »`
+                );
+            }
             if (model.adhesionType === 'FAMILLE') {
                 model.issues.push(
                     'Contrat Famille : vérifiez les bénéficiaires dans le contrat. Seul le souscripteur sera inscrit dans le fichier Excel CIEL'
@@ -3600,7 +3698,7 @@
         ).map(model => [
             'A régler',
             tds,
-            null,
+            model.cieContractNumber,
             Number(cielDateDigits(model.effectDate)) || null,
             Number(cielDateDigits(model.expiration)) || null,
             model.civility === 'M.' ? 'M' : model.civility,
@@ -3624,6 +3722,7 @@
             rowId: model.rowId,
             policyId: model.policyId,
             contractNumber: model.contractNumber,
+            cieContractNumber: model.cieContractNumber,
             role: model.role,
             adhesionType: model.adhesionType,
             country: model.country,
@@ -3803,6 +3902,7 @@
                     { value: 'needs-review', label: 'À vérifier' },
                     { value: 'non-justified', label: 'Non justifié' },
                 ], 'Paiement')}
+                <label class="ltoa-field"><span>N° de contrat ${escapeHtml(subscriberModel.contractYear || '')}</span><input data-contract-field="cieContractNumber" value="${escapeHtml(subscriberModel.cieContractNumber)}" placeholder="À créer et renseigner si absent" aria-label="Numéro de contrat CIEL"></label>
                 <label class="ltoa-field ltoa-field-country"><span>Pays de rapatriement</span><input data-contract-field="country" value="${escapeHtml(subscriberModel.country)}" placeholder="À renseigner" aria-label="Pays d'inhumation"></label>`;
             const people = group.map((model, personIndex) => {
                 const evidence = model.evidenceDocuments?.length
@@ -4003,9 +4103,14 @@
         setMessage('Préparation immédiate du fichier CIEL…', { kind: 'working', progress: 90 });
         const rows = buildCielRows(state);
         if (!rows.length) throw new Error('Aucun contrat avec paiement confirmé à ajouter.');
+        const missingContractNumbers = rows.filter(values => !normalizeCielContractNumber(values[2]));
+        if (missingContractNumbers.length) {
+            throw new Error(`${missingContractNumbers.length} numéro(s) de contrat manquent. Créez-les et renseignez-les dans l’écran de vérification avant l’export.`);
+        }
         rows.forEach(values => {
-            // C reste toujours vide : le numéro d’adhésion sera attribué par CIEL.
-            values[2] = null;
+            // C contient le numéro créé par LTOA, repris de la fiche client ou
+            // des pièces 2026, puis contrôlé dans le dashboard.
+            values[2] = normalizeCielContractNumber(values[2]);
             // B reprend seulement le numéro de convention/TDS du fichier officiel.
             values[1] = state.baseWorkbook.tds;
             // Le type CIEL ne doit jamais dépendre d'une variante d'écriture.
