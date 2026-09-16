@@ -1,0 +1,29 @@
+name: Fix userscript metadata
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/fix-userscript-metadata.yml']
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch metadata only
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('declaration-ciel-automatique.user.js')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('// @version      1.0.17', '// @version      1.0.18', 1)
+          s = s.replace('https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/eclaration-ciel-automatique.user.js', 'https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/declaration-ciel-automatique.user.js')
+          p.write_text(s, encoding='utf-8')
+      - name: Commit metadata fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add declaration-ciel-automatique.user.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix Tampermonkey update URLs and bump version to 1.0.18"
+          git push
