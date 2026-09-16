@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LTOA - Agent Déclaration CIEL
 // @namespace    https://ltoa-assurances.fr/
-// @version      1.0.17
+// @version      1.0.18
 // @description  Traite les contrats CIEL, contrôle chaque preuve de paiement dans toute la GED, puis génère une déclaration Excel financièrement sécurisée et un JSON auditable.
 // @author       LTOA Assurances
 // @match        https://courtage.modulr.fr/*
@@ -12,8 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      courtage.modulr.fr
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/eclaration-ciel-automatique.user.js
-// @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/eclaration-ciel-automatique.user.js
+// @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/declaration-ciel-automatique.user.js
+// @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/declaration-ciel/main/declaration-ciel-automatique.user.js
 // ==/UserScript==
 
 (function () {
